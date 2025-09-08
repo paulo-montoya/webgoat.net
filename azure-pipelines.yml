@@ -13,6 +13,8 @@ variables:
   solution: '**/*.sln'
   buildPlatform: 'Any CPU'
   buildConfiguration: 'Release'
+  FOD_API_BASE: 'https://api.ams.fortify.com'   # AMS; use emea/apac base if needed
+  FOD_RELEASE_ID: '945671'
 
 steps:
 - task: NuGetToolInstaller@1
@@ -46,3 +48,63 @@ steps:
     BuildType: 'none'
     PollingInterval: 2
     PolicyFailAction: '0'
+
+- powershell: |
+    $ErrorActionPreference = 'Stop'
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    $base   = "$(FOD_API_BASE)"
+    $relId  = "$(FOD_RELEASE_ID)"
+    $cid    = "$(FOD_CLIENT_ID)"
+    $csec   = "$(FOD_CLIENT_SECRET)"
+
+    Write-Host "Requesting OAuth token..."
+    $tokenResp = Invoke-RestMethod -Method Post -Uri "$base/oauth/token" `
+      -ContentType 'application/x-www-form-urlencoded' `
+      -Body @{
+        grant_type='client_credentials'
+        scope='api-tenant'
+        client_id=$cid
+        client_secret=$csec
+      }
+    $tok = $tokenResp.access_token
+    if (-not $tok) { throw "No access_token returned from FoD." }
+
+    Write-Host "Fetching scans for release $relId..."
+    $scans = Invoke-RestMethod -Method Get -Uri "$base/api/v3/releases/$relId/scans?limit=50" `
+      -Headers @{ Authorization = "Bearer $tok" }
+
+    if (-not $scans.items) { throw "No scans found for release $relId." }
+
+    # Get the most recent completed static scan
+    $latest = $scans.items |
+      Where-Object { $_.scanType -eq 'Static' -and $_.analysisStatus -eq 'Completed' } |
+      Sort-Object -Property completedDateTime -Descending |
+      Select-Object -First 1
+
+    if (-not $latest) { throw "No completed static scans found for release $relId." }
+
+    $scanId = $latest.scanId
+    Write-Host "Most recent completed static scanId = $scanId"
+
+    $outDir = "$(Build.ArtifactStagingDirectory)\FoD"
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    $outFile = Join-Path $outDir ("scan-$scanId.fpr")
+
+    Write-Host "Downloading FPR..."
+    Invoke-WebRequest -Method Get -Uri "$base/api/v3/scans/$scanId/fpr" `
+      -Headers @{ Authorization = "Bearer $tok" } -OutFile $outFile
+
+    Write-Host "FPR saved to $outFile"
+  displayName: "Download most recent completed FoD FPR"
+  env:
+    FOD_CLIENT_ID: $(FOD_CLIENT_ID)         # stored as secret variable
+    FOD_CLIENT_SECRET: $(FOD_CLIENT_SECRET) # stored as secret variable
+
+- task: PublishBuildArtifacts@1
+  displayName: "Publish FoD FPR artifact"
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)\FoD'
+    ArtifactName: 'fod-fpr'
+    publishLocation: 'Container'
+
