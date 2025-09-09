@@ -85,7 +85,7 @@ steps:
 
       if ($scans.items) {
         $latest = $scans.items |
-          Where-Object { $_.scanType -eq 'Static' -and $_.analysisStatus -eq 'Completed' } |
+          Where-Object { $_.scanType -eq 'Static' -and $_.analysisStatusType -eq 'Completed' } |
           Sort-Object -Property completedDateTime -Descending |
           Select-Object -First 1
       }
