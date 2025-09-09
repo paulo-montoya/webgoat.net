@@ -102,33 +102,31 @@ steps:
       $resp = Invoke-WebRequest -Method Get -Uri "$base/api/v3/scans/$scanId/fpr" `
         -Headers @{ Authorization = "Bearer $tok" } -UseBasicParsing
 
-      if ($resp.ContentType -like "application/json*") {
-        Write-Host "Got JSON instead of FPR, likely not ready yet."
-        try {
-          $json = $resp.Content | ConvertFrom-Json
-          Write-Host "Response: $($json | ConvertTo-Json -Compress)"
-        } catch {
-          Write-Host "Non-FPR response: $($resp.Content)"
-        }
+      # Try parsing as JSON (means FPR not ready)
+      try {
+        $json = $resp.Content | ConvertFrom-Json -ErrorAction Stop
+        Write-Host "FoD says FPR not ready yet: $($json | ConvertTo-Json -Compress)"
+        Start-Sleep -Seconds $retryDelay
+        $attempt++
+        continue
+      } catch {
+        # Not JSON -> must be binary
+      }
+
+      # Save raw bytes
+      [System.IO.File]::WriteAllBytes($outFile, $resp.RawContentStream.ToArray())
+      $size = (Get-Item $outFile).Length
+      Write-Host "FPR saved to $outFile (size = $size bytes)"
+
+      if ($size -lt 50000) {
+        Write-Host "Downloaded file too small (<50 KB), retrying..."
+        Remove-Item $outFile -Force
         Start-Sleep -Seconds $retryDelay
         $attempt++
       }
       else {
-        # Save raw bytes
-        [System.IO.File]::WriteAllBytes($outFile, $resp.Content)
-        $size = (Get-Item $outFile).Length
-        Write-Host "FPR saved to $outFile (size = $size bytes)"
-
-        if ($size -lt 50000) {
-          Write-Host "Downloaded file too small (<50 KB), retrying..."
-          Remove-Item $outFile -Force
-          Start-Sleep -Seconds $retryDelay
-          $attempt++
-        }
-        else {
-          $success = $true
-          break
-        }
+        $success = $true
+        break
       }
     }
 
