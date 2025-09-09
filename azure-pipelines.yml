@@ -58,6 +58,11 @@ steps:
     $cid    = "$(FOD_CLIENT_ID)"
     $csec   = "$(FOD_CLIENT_SECRET)"
 
+    # How long to wait (in minutes) before giving up
+    $maxWaitMinutes = 15
+    # How often to poll (in seconds)
+    $pollSeconds = 60
+
     Write-Host "Requesting OAuth token..."
     $tokenResp = Invoke-RestMethod -Method Post -Uri "$base/oauth/token" `
       -ContentType 'application/x-www-form-urlencoded' `
@@ -70,36 +75,50 @@ steps:
     $tok = $tokenResp.access_token
     if (-not $tok) { throw "No access_token returned from FoD." }
 
-    Write-Host "Fetching scans for release $relId..."
-    $scans = Invoke-RestMethod -Method Get -Uri "$base/api/v3/releases/$relId/scans?limit=50" `
-      -Headers @{ Authorization = "Bearer $tok" }
+    $elapsed = 0
+    $latest = $null
 
-    if (-not $scans.items) { throw "No scans found for release $relId." }
+    while ($elapsed -lt ($maxWaitMinutes*60)) {
+      Write-Host "Polling scans for release $relId (elapsed ${elapsed}s)..."
+      $scans = Invoke-RestMethod -Method Get -Uri "$base/api/v3/releases/$relId/scans?limit=50" `
+        -Headers @{ Authorization = "Bearer $tok" }
 
-    # Get the most recent completed static scan
-    $latest = $scans.items |
-      Where-Object { $_.scanType -eq 'Static' -and $_.analysisStatus -eq 'Completed' } |
-      Sort-Object -Property completedDateTime -Descending |
-      Select-Object -First 1
+      if ($scans.items) {
+        $latest = $scans.items |
+          Where-Object { $_.scanType -eq 'Static' -and $_.analysisStatus -eq 'Completed' } |
+          Sort-Object -Property completedDateTime -Descending |
+          Select-Object -First 1
+      }
 
-    if (-not $latest) { throw "No completed static scans found for release $relId." }
+      if ($latest) {
+        Write-Host "Found completed static scan: scanId=$($latest.scanId)"
+        break
+      }
+
+      Write-Host "No completed static scan yet, sleeping $pollSeconds seconds..."
+      Start-Sleep -Seconds $pollSeconds
+      $elapsed += $pollSeconds
+    }
+
+    if (-not $latest) {
+      throw "Timed out after $maxWaitMinutes minutes waiting for a completed static scan on release $relId."
+    }
 
     $scanId = $latest.scanId
-    Write-Host "Most recent completed static scanId = $scanId"
-
     $outDir = "$(Build.ArtifactStagingDirectory)\FoD"
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     $outFile = Join-Path $outDir ("scan-$scanId.fpr")
 
-    Write-Host "Downloading FPR..."
+    Write-Host "Downloading FPR for scanId=$scanId..."
     Invoke-WebRequest -Method Get -Uri "$base/api/v3/scans/$scanId/fpr" `
       -Headers @{ Authorization = "Bearer $tok" } -OutFile $outFile
 
     Write-Host "FPR saved to $outFile"
-  displayName: "Download most recent completed FoD FPR"
+  displayName: "Download most recent completed FoD FPR (with wait/retry)"
   env:
-    FOD_CLIENT_ID: $(FOD_CLIENT_ID)         # stored as secret variable
-    FOD_CLIENT_SECRET: $(FOD_CLIENT_SECRET) # stored as secret variable
+    FOD_CLIENT_ID: $(FOD_CLIENT_ID)         # mark as secret in pipeline UI
+    FOD_CLIENT_SECRET: $(FOD_CLIENT_SECRET) # mark as secret in pipeline UI
+
 
 - task: PublishBuildArtifacts@1
   displayName: "Publish FoD FPR artifact"
